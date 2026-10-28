@@ -1184,7 +1184,8 @@ class IPodify(App):
             self.toggle_sub(v.source, subscribe_only=True)
             self.sync_podcasts(v.source.feed)
         elif v.kind == "tracks":
-            self.transfer_tracks(list(v.visible()), v.title.lstrip("◉≡♥☺ "), v)
+            if not self._check_running():
+                self.transfer_tracks(list(v.visible()), v.title.lstrip("◉≡♥☺ "), v)
         else:
             self.action_to_ipod()
 
@@ -1200,8 +1201,8 @@ class IPodify(App):
         missing = [t for t in known if av.get(t.id) is False]
         if not known:
             return ""
-        return f"{len(known) - len(missing)} von {len(known)} bei YouTube & Co." + \
-            (f" · {len(missing)} fehlen" if missing else "")
+        return f"{len(known) - len(missing)}/{len(known)} bei YouTube & Co." + \
+            (f", {len(missing)} fehlen" if missing else "")
 
     def _check(self, tracks: list[Track], view: View) -> None:
         """Blocking availability check with progress in the view's subtitle (worker thread)."""
@@ -1211,17 +1212,32 @@ class IPodify(App):
         todo = av.unknown(tracks)
         if not todo:
             return
-        self._ui(self._set_subtitle, view, f"{base} · prüft Verfügbarkeit 0/{len(todo)} …")
+        self._checking = True
+        self._ui(self.notify, f"spotDL sucht Quellen für {len(todo)} Titel – das dauert ein bis zwei Minuten.",
+                 title="? Verfügbarkeit", timeout=8)
+        progress = lambda d, n: self._ui(self._set_subtitle, view, f"? prüft Verfügbarkeit {d}/{n} …")  # noqa: E731
+        progress(0, len(todo))
         try:
-            av.check(todo, lambda d, n: self._ui(self._set_subtitle, view, f"{base} · prüft Verfügbarkeit {d}/{n} …"))
+            av.check(todo, progress)
         finally:
-            self._ui(self._set_subtitle, view, f"{base} · {self._avail_summary(tracks)}".rstrip(" ·"))
+            self._checking = False
+            self._ui(self._set_subtitle, view, " · ".join(x for x in (self._avail_summary(tracks), base) if x))
             self._ui(self.refresh_rows, lambda it: isinstance(it, Track))
             if view is self.view:
                 self._ui(self.render_actions)
 
-    @work(thread=True, group="avail")
+    def _check_running(self) -> bool:
+        if getattr(self, "_checking", False):
+            self.notify("Die Verfügbarkeitsprüfung läuft noch – bitte warten.", severity="warning")
+            return True
+        return False
+
     def action_check_avail(self) -> None:
+        if not self._check_running():
+            self._check_view()
+
+    @work(thread=True, group="avail")
+    def _check_view(self) -> None:
         v = self.view
         tracks = [t for t in v.visible() if isinstance(t, Track)]
         if not tracks:

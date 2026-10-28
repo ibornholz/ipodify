@@ -497,7 +497,7 @@ class Availability:
         if not tracks:
             return {}
         cmd = [str(SPOTDL), "save", *(t.url for t in tracks), "--save-file", "-", "--preload",
-               "--simple-tui", "--audio", *AUDIO_PROVIDERS]
+               "--simple-tui", "--max-retries", "1", "--audio", *AUDIO_PROVIDERS]  # a miss costs seconds, not minutes
         cfg = load_config()
         if cfg.get("client_id") and cfg.get("client_secret"):
             cmd += ["--client-id", cfg["client_id"], "--client-secret", cfg["client_secret"]]
