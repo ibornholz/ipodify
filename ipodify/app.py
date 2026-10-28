@@ -199,6 +199,7 @@ class IPodify(App):
         self.api = SpotifyAPI()
         self.engine = Engine(lambda n, d: self._ui(self.on_engine_event, n, d))
         self.ipod = IPod()
+        self.ipod.before_remount = self.engine.suspend_local  # pause iPod playback for a remount
         self.subs = Subscriptions()
         self.transfers = Transfers(self.ipod, lambda job: self._ui(self.on_job, job), self.subs)
         self.view = View("search", "Spotify-Suche", "Songs, Alben, Künstler, Playlists – oder einen Spotify-Link",

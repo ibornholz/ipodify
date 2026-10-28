@@ -111,6 +111,7 @@ player = "sdk"                     # "sdk" (default) · "app" (remote-control th
 spotify_device = ""                # preferred Connect device; set by the output menu
 playlist = "iPodify"               # iPod playlist that receives new songs
 format = "mp3"                     # spotDL output: "mp3" or "m4a"
+audio = ["youtube-music", "youtube", "soundcloud", "bandcamp"]  # spotDL sources, tried in this order
 volume = 70
 cookies_from_browser = "chromium"  # lets spotDL/yt-dlp use your YouTube cookies against bot checks
 ```

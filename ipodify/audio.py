@@ -149,6 +149,7 @@ class Engine:
         self.local_gen = 0
         self.local_run = threading.Event()
         self.local_pos = 0.0
+        self.local_path = ""
         self.local_info: dict = {}
 
         self.sock_path = Path(tempfile.gettempdir()) / f"ipodify-ev-{os.getpid()}.sock"
@@ -296,6 +297,7 @@ class Engine:
         self.local_gen += 1
         gen = self.local_gen
         self.local_pos = start
+        self.local_path = path
         if info is not None:
             self.local_info = info
         self.local_run.set()
@@ -331,6 +333,27 @@ class Engine:
 
     def pause_local(self, paused: bool) -> None:
         (self.local_run.clear if paused else self.local_run.set)()
+
+    def suspend_local(self, under: str):
+        """Stop ffmpeg if it is reading a file below `under` (e.g. the iPod mount), so the volume
+        can be unmounted. Returns a callback that resumes at the same position, or None."""
+        path = self.local_path
+        if not (self.source == "local" and self.local_proc and self.local_proc.poll() is None
+                and path and not path.startswith("http") and path.startswith(under.rstrip("/") + "/")):
+            return None
+        pos, paused, info = max(0.0, self.local_pos - Output.delay()), not self.local_run.is_set(), self.local_info
+        proc = self.local_proc
+        self._stop_local()
+        try:
+            proc.wait(timeout=3)  # the file must really be closed before the unmount
+        except subprocess.TimeoutExpired:
+            pass
+
+        def resume() -> None:
+            self.play_local(path, pos, info=info)
+            if paused:
+                self.pause_local(True)
+        return resume
 
     def stop(self) -> None:
         self._stop_local()

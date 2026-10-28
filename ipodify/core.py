@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -57,6 +58,10 @@ CONFIG = load_config()
 PLAYLIST = CONFIG.get("playlist", "iPodify")
 FORMAT = CONFIG.get("format", "mp3")
 COOKIES_BROWSER = CONFIG.get("cookies_from_browser", "")
+# spotDL tries these in order until one has the song (youtube-music alone is spotDL's default).
+AUDIO_PROVIDERS = ["youtube-music", "youtube", "soundcloud", "bandcamp"]
+_cfg_audio = CONFIG.get("audio", AUDIO_PROVIDERS)
+AUDIO_PROVIDERS = [p for p in ([_cfg_audio] if isinstance(_cfg_audio, str) else list(_cfg_audio)) if p] or AUDIO_PROVIDERS
 
 # ── Theme ───────────────────────────────────────────────────────────────────
 
@@ -283,6 +288,9 @@ class IPod:
         self.state = IPodState()
         self.last_write = 0.0
         self.busy = 0
+        # Called with the mount point before an unmount; may return a callback that is run once the
+        # iPod is mounted again (the app uses this to pause a track playing from the iPod).
+        self.before_remount: Callable[[str], Callable[[], None] | None] | None = None
 
     # reading ------------------------------------------------------------------
     def refresh(self) -> IPodState:
@@ -359,8 +367,24 @@ class IPod:
             raise RuntimeError("kein iPod angeschlossen")
         if writable:
             return mount
-        self._udisks("unmount", "-b", part)
-        self._udisks("mount", "-b", part, "-o", "force")
+        resume = self.before_remount(str(mount)) if self.before_remount else None
+        try:
+            try:
+                self._udisks("unmount", "-b", part)
+            except RuntimeError as e:
+                if "busy" in str(e).lower():
+                    raise RuntimeError("iPod wird noch benutzt (Datei geöffnet) – Wiedergabe stoppen "
+                                       "und erneut versuchen") from e
+                raise
+            self._udisks("mount", "-b", part, "-o", "force")
+        finally:
+            if resume:
+                if not find_ipod()[1]:  # remount failed: at least get it back read-only
+                    try:
+                        self._udisks("mount", "-b", part)
+                    except RuntimeError:
+                        pass
+                resume()
         part, mount, writable = find_ipod()
         if not writable:
             raise DirtyFilesystem("iPod-Dateisystem muss geprüft werden – ./setup.sh ausführen")
@@ -508,7 +532,8 @@ class Transfers:
         cmd = [str(SPOTDL), "download", *(j.track.url for j in batch),
                # relative on purpose: spotDL strips leading dots from path parts (~/.cache → ~/cache)
                "--output", "{track-id}.{output-ext}", "--format", FORMAT,
-               "--bitrate", "auto", "--threads", "4", "--simple-tui", "--print-errors"]
+               "--bitrate", "auto", "--threads", "4", "--simple-tui", "--print-errors",
+               "--audio", *AUDIO_PROVIDERS]
         cfg = load_config()
         if cfg.get("client_id") and cfg.get("client_secret"):  # own app instead of spotDL's shared one
             cmd += ["--client-id", cfg["client_id"], "--client-secret", cfg["client_secret"]]
