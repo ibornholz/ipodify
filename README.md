@@ -150,6 +150,18 @@ Other files: podcast subscriptions in `~/.config/ipodify/podcasts.json`; downloa
 - **Songs vanished after syncing with a Mac.** Finder/Music may replace the iPod's library with the
   Mac's. Either manage the iPod from one side only, or enable manual management on the Mac.
 
+## Development
+
+```sh
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/pytest
+```
+
+The tests run against a throw-away XDG tree and a fake `spotdl`, so they never touch your config,
+cache, iPod or the network. They cover the iPod read/write strategy, the transfer queue, the
+availability cache, the recorder's session and state handling, podcast feeds, Spotify search paging
+and the audio engine's suspend/resume. The Textual UI itself is not driven by tests.
+
 ## How it works
 
 See [docs/architecture.md](docs/architecture.md) for the moving parts: Spotify Web API and the headless

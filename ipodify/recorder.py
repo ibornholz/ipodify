@@ -32,6 +32,9 @@ def _pactl(*args: str) -> str:
 
 
 class Recorder:
+    START_TIMEOUT = 40  # seconds until the SDK must report the track playing
+    END_SLACK = 120  # seconds past the track's length until we give up waiting for the end
+
     def __init__(self, api, webplayer, notify, volume) -> None:
         """api: SpotifyAPI · webplayer: WebPlayer · notify(msg, **kw) · volume(): the user's volume."""
         self.api, self.webplayer, self.notify, self.volume = api, webplayer, notify, volume
@@ -142,9 +145,9 @@ class Recorder:
                 if started and ((ev.get("paused") and not ev.get("position")) or (ev.get("track") and not same)):
                     return
                 last, last_t = ev, now
-            if not started and now - t0 > 40:
+            if not started and now - t0 > self.START_TIMEOUT:
                 raise RuntimeError("Wiedergabe startet nicht")
-            if now - t0 > dur + 120:
+            if now - t0 > dur + self.END_SLACK:
                 raise RuntimeError("Spotify meldet kein Ende des Titels")
             if on_progress and now - last_report > 2 and last:
                 pos = last.get("position", 0) / 1000 + (0 if last.get("paused") else now - last_t)

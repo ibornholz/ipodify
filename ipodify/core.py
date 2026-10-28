@@ -122,6 +122,10 @@ class Track:
     cover: str = ""  # album art URL
 
     @property
+    def ms(self) -> int:  # same name as IPodTrack, so column sorting works for both
+        return self.duration_ms
+
+    @property
     def artist(self) -> str:
         return ", ".join(self.artists)
 
