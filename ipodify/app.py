@@ -25,21 +25,24 @@ from .core import save_config
 from .podcasts import Episode, Podcast, Subscriptions
 from .audio import Engine
 from .core import Album, Artist, IPod, IPodTrack, Job, Playlist, Track, Transfers, fmt_time
-from .screens import ConfirmScreen, DeviceScreen, LoginScreen, PlaylistScreen, SetupScreen, TagScreen, TextScreen
+from .recorder import Recorder
+from .screens import (ChoiceScreen, ConfirmScreen, DeviceScreen, LoginScreen, PlaylistScreen, SetupScreen,
+                      TagScreen, TextScreen)
 from .spotify import DASHBOARD_URL, DEVICE_NAME, PLAYER, REDIRECT_URI, SpotifyAPI, open_url
 from .webplayer import WebPlayer
 from .widgets import Marquee, SeekBar, Spectrum, TitleBar, VolumeBar
 
-JOB_ICON = {"wartet": "…", "lädt": "⇣", "bereit": "⇣", "wartet auf iPod": "◌", "überträgt": "⇪",
+JOB_ICON = {"wartet": "…", "lädt": "⇣", "nimmt auf": "⏺", "bereit": "⇣", "wartet auf iPod": "◌", "überträgt": "⇪",
             "fertig": "✓", "fehler": "✗"}
-JOB_INFO = {"wartet": "in der Warteschlange", "lädt": "spotDL sucht auf YouTube & lädt …",
+JOB_INFO = {"wartet": "in der Warteschlange", "lädt": "spotDL sucht auf YouTube & Co. und lädt …",
+            "nimmt auf": "Mitschnitt vom Spotify-Player in Echtzeit …",
             "bereit": "geladen, wartet aufs Schreiben", "wartet auf iPod": "iPod anschließen",
             "überträgt": "wird auf den iPod geschrieben …", "fertig": f"auf dem iPod · Playlist „{core.PLAYLIST}“"}
 
 # width > 0: fixed, width < 0: share of the remaining space
 COLUMNS = {
     "tracks": [("", "now", 2), ("#", "nr", 3), ("Titel", "title", -4), ("Künstler", "artist", -3),
-               ("Album", "album", -3), ("Zeit", "time", 5), ("iPod", "ipod", 4)],
+               ("Album", "album", -3), ("Zeit", "time", 5), ("Web", "web", 3), ("iPod", "ipod", 4)],
     "albums": [("Album", "name", -4), ("Künstler", "artist", -3), ("Jahr", "year", 4), ("Titel", "total", 5),
                ("iPod", "ipod", 6)],
     "playlists": [("Playlist", "name", -4), ("Von", "owner", -2), ("Titel", "total", 6)],
@@ -68,6 +71,7 @@ class View:
     filter: str = ""
     sort: tuple[str, bool] | None = None
     cursor: int = 0
+    sub_base: str = ""  # subtitle without the availability suffix
 
     def visible(self) -> list:
         items = self.items
@@ -219,6 +223,8 @@ class IPodify(App):
         self._main_thread = threading.get_ident()
         self._volume_pending = False
         self.webplayer = WebPlayer(DEVICE_NAME, self.api.token, lambda k, e: self._ui(self.on_webplayer, k, e))
+        self.transfers.recorder = Recorder(self.api, self.webplayer, lambda m, **kw: self._ui(self.notify, m, **kw),
+                                           lambda: self.engine.volume)
 
     def _ui(self, fn, *args, **kwargs) -> None:
         """Run fn on the UI thread, from wherever we are (and ignore calls after shutdown)."""
@@ -542,7 +548,9 @@ class IPodify(App):
                 mark = ""
             now = Text("▶", style=f"bold {th.success}") if self.now_key == item.id else ""
             nr = item.track_nr if isinstance(self.view.source, Album) else i + 1
-            return now, str(nr), item.title, item.artist, item.album, fmt_time(item.duration_ms / 1000), mark
+            avail = self.transfers.availability.get(item.id)
+            web = "" if avail is None else Text("✓" if avail else "✗", style=th.success if avail else f"bold {th.error}")
+            return now, str(nr), item.title, item.artist, item.album, fmt_time(item.duration_ms / 1000), web, mark
         if isinstance(item, Album):
             n = st.album_count(item.name, item.artists[0] if item.artists else "")
             full = item.total and n >= item.total
@@ -575,7 +583,7 @@ class IPodify(App):
         if isinstance(item, Job):
             color = {"fertig": th.success, "fehler": th.error}.get(item.state, th.warning)
             return (Text(JOB_ICON[item.state], style=f"bold {color}"), Text(item.state, style=color),
-                    item.track.display, item.error or JOB_INFO.get(item.state, ""))
+                    item.track.display, item.error or item.progress or JOB_INFO.get(item.state, ""))
         return ()
 
     def render_actions(self) -> None:
@@ -590,6 +598,9 @@ class IPodify(App):
             what = "Album" if isinstance(v.source, Album) else "Playlist" if isinstance(v.source, Playlist) else "Alle"
             buttons.append(("view_to_ipod", f"⇪ {what} auf den iPod", "ipod"))
             buttons.append(("to_ipod", "⇪ Song auf den iPod", ""))
+            buttons.append(("check_avail", "? Verfügbarkeit prüfen", ""))
+            if n := len(self._missing_in_view()):
+                buttons.append(("record_missing", f"⏺ {n} fehlende mitschneiden", ""))
         elif v.kind == "albums":
             if isinstance(v.source, Artist):
                 buttons.append(("artist_top", "♫ Top-Songs", "primary"))
@@ -608,6 +619,8 @@ class IPodify(App):
                 buttons += [("rename_playlist", "✎ Umbenennen", ""), ("delete_playlist", "✗ Playlist löschen", "danger")]
         elif v.kind == "jobs":
             buttons += [("retry", "↻ Fehlgeschlagene wiederholen", ""), ("clear_jobs", "Erledigte ausblenden", "")]
+            if n := len(self.transfers.failed_downloads()):
+                buttons.append(("record_failed", f"⏺ {n} fehlgeschlagene mitschneiden", ""))
         elif v.kind == "podcasts":
             if v.source == "subs":
                 buttons.append(("sync_podcasts", "⟳ Alle mit dem iPod synchronisieren", "ipod"))
@@ -1171,9 +1184,119 @@ class IPodify(App):
             self.toggle_sub(v.source, subscribe_only=True)
             self.sync_podcasts(v.source.feed)
         elif v.kind == "tracks":
-            self.queue_items(list(v.visible()), label=v.title.lstrip("◉≡♥☺ "))
+            self.transfer_tracks(list(v.visible()), v.title.lstrip("◉≡♥☺ "), v)
         else:
             self.action_to_ipod()
+
+    # ── availability (YouTube & Co.) and recording ───────────────────────────
+    def _set_subtitle(self, view: View, text: str) -> None:
+        view.subtitle = text
+        if view is self.view:
+            self.query_one("#view-sub", Static).update(text)
+
+    def _avail_summary(self, tracks: list[Track]) -> str:
+        av = self.transfers.availability
+        known = [t for t in tracks if av.get(t.id) is not None]
+        missing = [t for t in known if av.get(t.id) is False]
+        if not known:
+            return ""
+        return f"{len(known) - len(missing)} von {len(known)} bei YouTube & Co." + \
+            (f" · {len(missing)} fehlen" if missing else "")
+
+    def _check(self, tracks: list[Track], view: View) -> None:
+        """Blocking availability check with progress in the view's subtitle (worker thread)."""
+        base = view.sub_base or view.subtitle
+        view.sub_base = base
+        av = self.transfers.availability
+        todo = av.unknown(tracks)
+        if not todo:
+            return
+        self._ui(self._set_subtitle, view, f"{base} · prüft Verfügbarkeit 0/{len(todo)} …")
+        try:
+            av.check(todo, lambda d, n: self._ui(self._set_subtitle, view, f"{base} · prüft Verfügbarkeit {d}/{n} …"))
+        finally:
+            self._ui(self._set_subtitle, view, f"{base} · {self._avail_summary(tracks)}".rstrip(" ·"))
+            self._ui(self.refresh_rows, lambda it: isinstance(it, Track))
+            if view is self.view:
+                self._ui(self.render_actions)
+
+    @work(thread=True, group="avail")
+    def action_check_avail(self) -> None:
+        v = self.view
+        tracks = [t for t in v.visible() if isinstance(t, Track)]
+        if not tracks:
+            return
+        for t in tracks:  # a fresh look on purpose
+            self.transfers.availability.forget(t.id)
+        try:
+            self._check(tracks, v)
+        except Exception as e:  # noqa: BLE001
+            self._ui(self.notify, f"Verfügbarkeit: {e}"[:300], severity="error")
+
+    def _missing_in_view(self) -> list[Track]:
+        av, keys = self.transfers.availability, self.ipod.state.keys
+        return [t for t in self.view.items if isinstance(t, Track) and av.get(t.id) is False
+                and t.key not in keys and not getattr(self.transfers.jobs.get(t.id), "record", False)]
+
+    @work(thread=True, group="queue")
+    def transfer_tracks(self, tracks: list[Track], label: str, view: View) -> None:
+        """Album/playlist → iPod: check the sources first and ask when some titles are missing."""
+        todo = [t for t in tracks if isinstance(t, Track) and t.key not in self.ipod.state.keys]
+        if not todo:
+            self._ui(self.notify, f"{label}\nAlles schon auf dem iPod.", title="⇪ Auf den iPod")
+            return
+        try:
+            self._check(todo, view)
+        except Exception as e:  # noqa: BLE001
+            self._ui(self.notify, f"Verfügbarkeit: {e}"[:300], severity="warning")
+        av = self.transfers.availability
+        missing = [t for t in todo if av.get(t.id) is False]
+        if not missing:
+            self.queue_items(todo, label=label)
+            return
+        avail = [t for t in todo if t not in missing]
+        names = "\n".join(f"  ✗ {t.title}"[:66] for t in missing[:8]) + ("\n  …" if len(missing) > 8 else "")
+        secs = sum(t.duration_ms for t in missing) / 1000
+        msg = (f"{len(missing)} von {len(todo)} Titeln sind bei YouTube & Co. nicht zu finden:\n{names}\n\n"
+               f"Die fehlenden lassen sich über den Spotify-Player mitschneiden – in Echtzeit "
+               f"({fmt_time(secs)}), auf eigene Verantwortung (Spotify-Nutzungsbedingungen).")
+        choices = []
+        if avail:
+            choices.append(("avail", f"Nur die {len(avail)} verfügbaren"))
+        choices.append(("all", f"Alle – {len(missing)} mitschneiden"))
+
+        def chosen(c) -> None:
+            if c == "avail":
+                self.queue_items(avail, label=label)
+            elif c == "all":
+                if avail:
+                    self.queue_items(avail, label=label)
+                self._record(missing)
+
+        self._ui(self.push_screen, ChoiceScreen("⇪ Auf den iPod", msg, choices), chosen)
+
+    def _record(self, tracks: list[Track]) -> None:
+        n = sum(self.transfers.add(t, record=True) for t in tracks)
+        self.notify(f"{n} Titel werden mitgeschnitten – siehe Übertragungen.", title="⏺ Mitschnitt")
+        self.rebuild_sidebar()
+        self.refresh_rows(lambda it: isinstance(it, Track))
+        self.render_actions()
+
+    def _confirm_record(self, tracks: list[Track]) -> None:
+        if not tracks:
+            return
+        secs = sum(t.duration_ms for t in tracks) / 1000
+        msg = (f"{len(tracks)} Titel über den Spotify-Player mitschneiden?\n\n"
+               f"Das läuft in Echtzeit ({fmt_time(secs)}); der Spotify-Player ist währenddessen stumm, "
+               f"iPod und Podcasts spielen weiter. Mitschnitte verstoßen gegen Spotifys Nutzungsbedingungen – "
+               f"auf eigene Verantwortung.")
+        self.push_screen(ConfirmScreen("⏺ Mitschnitt", msg, "Mitschneiden"), lambda ok: ok and self._record(tracks))
+
+    def action_record_missing(self) -> None:
+        self._confirm_record(self._missing_in_view())
+
+    def action_record_failed(self) -> None:
+        self._confirm_record(self.transfers.failed_downloads())
 
     @work(thread=True, group="queue")
     def queue_items(self, items: list, label: str = "") -> None:
@@ -1203,6 +1326,8 @@ class IPodify(App):
         else:
             self.refresh_rows(lambda it: isinstance(it, (Track, Episode)) and it.id == job.track.id)
         self.rebuild_sidebar()
+        if self.view.kind == "jobs" and job.state in ("fehler", "nimmt auf"):
+            self.render_actions()
         if job.state == "fehler":
             self.notify(f"{job.track.display}: {job.error}"[:300], severity="error", title="Übertragung")
         elif job.state == "fertig" and not self.transfers.active:

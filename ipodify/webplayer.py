@@ -32,6 +32,9 @@ window.onSpotifyWebPlaybackSDKReady = () => {
   for (const e of ['initialization_error', 'authentication_error', 'account_error', 'playback_error'])
     player.addListener(e, ({message}) => post('error', {type: e, message}));
   player.addListener('autoplay_failed', () => post('error', {type: 'autoplay_failed', message: ''}));
+  player.addListener('player_state_changed', s => s && post('state', {
+    paused: s.paused, position: s.position, duration: s.duration,
+    track: (s.track_window && s.track_window.current_track) ? s.track_window.current_track.id : null}));
   player.connect().then(ok => post('connected', {ok}));
   window.player = player;
 };
@@ -63,6 +66,7 @@ class WebPlayer:
         self.server: http.server.HTTPServer | None = None
         self.device_id: str | None = None
         self.profile = CACHE / "chromium-player"
+        self.state_hook = None  # gets every 'state' event too (the recorder listens here)
 
     @property
     def running(self) -> bool:
@@ -104,6 +108,10 @@ class WebPlayer:
                     return
                 if ev.get("kind") == "ready":
                     outer.device_id = ev.get("device_id")
+                if ev.get("kind") == "state":
+                    if outer.state_hook:
+                        outer.state_hook(ev)
+                    return
                 outer.on_event(ev.get("kind", ""), ev)
 
             def log_message(self, *args):
@@ -135,9 +143,11 @@ class WebPlayer:
         for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
             (self.profile / lock).unlink(missing_ok=True)
 
-    def start(self) -> None:
+    def start(self, env: dict[str, str] | None = None) -> None:
+        """env: extra environment, e.g. PULSE_SINK to route the player's audio elsewhere."""
         if self.running:
             return
+        self.device_id = None
         exe = chromium_binary()
         if not exe:
             raise RuntimeError("Chromium fehlt für den Web-Player")
@@ -152,7 +162,8 @@ class WebPlayer:
              # without a copied Widevine CDM, let Chromium's component updater fetch one
              *(["--disable-component-update"] if (self.profile / "WidevineCdm").exists() else []),
              f"http://127.0.0.1:{port}/"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            env=os.environ | (env or {}))
         reap_with_us(self.proc, group=True)  # renderer, GPU, audio … go down with it
 
     def stop(self) -> None:

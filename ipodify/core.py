@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import re
@@ -118,6 +119,7 @@ class Track:
     album_uri: str = ""
     year: int = 0
     track_nr: int = 0
+    cover: str = ""  # album art URL
 
     @property
     def artist(self) -> str:
@@ -449,8 +451,95 @@ class IPod:
 @dataclass
 class Job:
     track: Track  # or a podcasts.Episode
-    state: str = "wartet"  # wartet · lädt · bereit · überträgt · fertig · fehler
+    state: str = "wartet"  # wartet · lädt · nimmt auf · bereit · überträgt · fertig · fehler
     error: str = ""
+    progress: str = ""  # free text while running (recording position …)
+    record: bool = False  # capture from the Spotify player instead of downloading
+
+
+# ── Availability: which Spotify tracks spotDL can find on YouTube & co. ─────
+
+
+class Availability:
+    """Asks spotDL (`save --preload`) for a source per track, without downloading, and remembers the
+    answer: found URLs for a month, misses for a week (labels do upload late)."""
+
+    FILE = DATA / "availability.json"
+    TTL_FOUND, TTL_MISSING = 30 * 86400, 7 * 86400
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        try:
+            self.data: dict[str, dict] = json.loads(self.FILE.read_text())
+        except (OSError, ValueError):
+            self.data = {}
+
+    def get(self, track_id: str) -> bool | None:
+        """True = source known, False = nothing found, None = not checked (or expired)."""
+        e = self.data.get(track_id)
+        if not e:
+            return None
+        if time.time() - e.get("t", 0) > (self.TTL_FOUND if e.get("url") else self.TTL_MISSING):
+            return None
+        return bool(e.get("url"))
+
+    def song(self, track_id: str) -> dict | None:
+        """spotDL's song dict incl. download_url, for a download without a second search."""
+        e = self.data.get(track_id)
+        return e.get("song") if e and e.get("url") and self.get(track_id) else None
+
+    def unknown(self, tracks: list[Track]) -> list[Track]:
+        return [t for t in tracks if self.get(t.id) is None]
+
+    def check(self, tracks: list[Track], on_progress=None) -> dict[str, bool]:
+        """Blocking; one spotDL process for all tracks. on_progress(done, total) from this thread."""
+        tracks = list({t.id: t for t in tracks}.values())
+        if not tracks:
+            return {}
+        cmd = [str(SPOTDL), "save", *(t.url for t in tracks), "--save-file", "-", "--preload",
+               "--simple-tui", "--audio", *AUDIO_PROVIDERS]
+        cfg = load_config()
+        if cfg.get("client_id") and cfg.get("client_secret"):
+            cmd += ["--client-id", cfg["client_id"], "--client-secret", cfg["client_secret"]]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                env=os.environ | {"PYTHONUNBUFFERED": "1", "COLUMNS": "400"})
+        done, out = 0, []
+        for line in proc.stdout:
+            if line.startswith("Found url for ") or "generated an exception" in line:
+                done += 1
+                if on_progress:
+                    on_progress(min(done, len(tracks)), len(tracks))
+            out.append(line)
+        proc.wait()
+        text = "".join(out)
+        try:
+            songs = json.loads(text[text.rindex("\n["):])
+        except ValueError as e:
+            raise RuntimeError("spotDL lieferte kein Ergebnis") from e
+        found = {sg.get("song_id"): sg for sg in songs if sg and sg.get("download_url")}
+        result: dict[str, bool] = {}
+        with self.lock:
+            for t in tracks:
+                sg = found.get(t.id)
+                result[t.id] = bool(sg)
+                self.data[t.id] = {"url": sg["download_url"] if sg else "", "t": time.time(),
+                                   **({"song": sg} if sg else {})}
+            self._save()
+        return result
+
+    def forget(self, track_id: str) -> None:
+        with self.lock:
+            self.data.pop(track_id, None)
+            self._save()
+
+    def _save(self) -> None:
+        try:
+            DATA.mkdir(parents=True, exist_ok=True)
+            tmp = self.FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.data))
+            tmp.replace(self.FILE)
+        except OSError:
+            pass
 
 
 class Transfers:
@@ -461,33 +550,48 @@ class Transfers:
 
     BATCH = 12
 
-    def __init__(self, ipod: IPod, on_change, subs=None) -> None:
+    def __init__(self, ipod: IPod, on_change, subs=None, availability: Availability | None = None) -> None:
         self.ipod = ipod
         self.on_change = on_change
         self.subs = subs  # podcasts.Subscriptions – remembers which episodes we put on the iPod
+        self.availability = availability or Availability()
+        self.recorder = None  # recorder.Recorder, set by the app (needs the Spotify player)
         self.jobs: dict[str, Job] = {}
         self.pending: queue.Queue[Job] = queue.Queue()
         self.pod_pending: queue.Queue[Job] = queue.Queue()
+        self.rec_pending: queue.Queue[Job] = queue.Queue()
         self.ready: queue.Queue[Job] = queue.Queue()
         threading.Thread(target=self._download_loop, daemon=True).start()
         threading.Thread(target=self._pod_loop, daemon=True).start()
+        threading.Thread(target=self._record_loop, daemon=True).start()
         threading.Thread(target=self._write_loop, daemon=True).start()
 
-    def add(self, item) -> bool:
-        """item: a Spotify Track (→ spotDL) or a podcasts.Episode (→ plain download)."""
+    def add(self, item, record: bool = False) -> bool:
+        """item: a Spotify Track (→ spotDL, or record=True → captured from the Spotify player)
+        or a podcasts.Episode (→ plain download)."""
         job = self.jobs.get(item.id)
         if job and job.state != "fehler":
             return False
-        job = Job(item)
+        job = Job(item, record=record and isinstance(item, Track))
         self.jobs[item.id] = job
         self.on_change(job)
         is_episode = not isinstance(item, Track)
-        (self.ready if item.cached_file else self.pod_pending if is_episode else self.pending).put(job)
+        (self.ready if item.cached_file else self.pod_pending if is_episode else
+         self.rec_pending if job.record else self.pending).put(job)
         return True
 
     def retry_failed(self) -> int:
-        failed = [j.track for j in self.jobs.values() if j.state == "fehler"]
-        return sum(self.add(t) for t in failed)
+        failed = [j for j in self.jobs.values() if j.state == "fehler"]
+        return sum(self.add(j.track, record=j.record) for j in failed)
+
+    def failed_downloads(self) -> list[Track]:
+        """Spotify tracks whose download failed – candidates for a recording."""
+        return [j.track for j in self.jobs.values()
+                if j.state == "fehler" and not j.record and isinstance(j.track, Track)]
+
+    @property
+    def recording(self) -> bool:
+        return any(j.state == "nimmt auf" for j in self.jobs.values())
 
     def clear_done(self) -> list[str]:
         done = [k for k, j in self.jobs.items() if j.state == "fertig"]
@@ -500,7 +604,11 @@ class Transfers:
         return sum(j.state not in ("fertig", "fehler") for j in self.jobs.values())
 
     def _set(self, job: Job, state: str, error: str = "") -> None:
-        job.state, job.error = state, error
+        job.state, job.error, job.progress = state, error, ""
+        self.on_change(job)
+
+    def _progress(self, job: Job, text: str) -> None:
+        job.progress = text
         self.on_change(job)
 
     @staticmethod
@@ -529,7 +637,14 @@ class Transfers:
         out_dir.mkdir(parents=True, exist_ok=True)
         for job in batch:
             self._set(job, "lädt")
-        cmd = [str(SPOTDL), "download", *(j.track.url for j in batch),
+        queries, preloaded = [], []
+        for j in batch:
+            (preloaded.append if (sg := self.availability.song(j.track.id)) else queries.append)(sg or j.track.url)
+        if preloaded:  # a .spotdl file carries the source URL → spotDL skips its search
+            spotdl_file = out_dir / f"batch-{int(time.time() * 1000)}.spotdl"
+            spotdl_file.write_text(json.dumps(preloaded))
+            queries.append(str(spotdl_file))
+        cmd = [str(SPOTDL), "download", *queries,
                # relative on purpose: spotDL strips leading dots from path parts (~/.cache → ~/cache)
                "--output", "{track-id}.{output-ext}", "--format", FORMAT,
                "--bitrate", "auto", "--threads", "4", "--simple-tui", "--print-errors",
@@ -554,6 +669,8 @@ class Transfers:
                     self._set(job, "bereit")
                     self.ready.put(job)
         proc.wait()
+        if preloaded:
+            spotdl_file.unlink(missing_ok=True)
         for job in waiting.values():
             if job.track.cached_file:
                 self._set(job, "bereit")
@@ -562,7 +679,33 @@ class Transfers:
                 self._set(job, "fehler", "YouTube-Bot-Sperre – cookies_from_browser in config.toml setzen")
             else:
                 hint = next((l for l in reversed(log) if norm(job.track.title)[:24] in norm(l)), "")
+                self.availability.forget(job.track.id)  # a remembered source may be stale
                 self._set(job, "fehler", hint[:200] or "kein passender YouTube-Treffer")
+
+    # recording -----------------------------------------------------------------
+    def _record_loop(self) -> None:
+        """Real-time capture from the Spotify player, one session for all queued recordings."""
+        while True:
+            batch = self._drain(self.rec_pending, self.rec_pending.get(), 500)
+            if not self.recorder:
+                for job in batch:
+                    self._set(job, "fehler", "Mitschnitt nicht verfügbar")
+                continue
+            try:
+                with self.recorder.session():
+                    while batch:
+                        job = batch.pop(0)
+                        self._set(job, "nimmt auf")
+                        try:
+                            self.recorder.record(job.track, lambda text, j=job: self._progress(j, text))
+                            self._set(job, "bereit")
+                            self.ready.put(job)
+                        except Exception as e:  # noqa: BLE001
+                            self._set(job, "fehler", f"Mitschnitt: {e}"[:200])
+                        batch += self._drain(self.rec_pending, None, 500)[1:]
+            except Exception as e:  # noqa: BLE001
+                for job in batch:
+                    self._set(job, "fehler", f"Mitschnitt: {e}"[:200])
 
     def _pod_loop(self) -> None:
         from . import podcasts

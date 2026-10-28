@@ -58,6 +58,31 @@ class ConfirmScreen(_Dialog):
         self.dismiss(e.button.id == "yes")
 
 
+class ChoiceScreen(_Dialog):
+    """A question with several answers; dismisses with the chosen key, None when cancelled."""
+
+    def __init__(self, title: str, message: str, choices: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self.title_, self.message, self.choices = title, message, choices
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog") as d:
+            d.border_title = self.title_
+            yield Static(self.message)
+            with Horizontal(classes="buttons"):
+                yield Button("Abbrechen", id="no")
+                for i, (_key, label) in enumerate(self.choices):
+                    yield Button(label, id=f"c{i}", variant="primary" if i == 0 else "default")
+
+    def on_mount(self) -> None:
+        self.query_one("#c0").focus()
+
+    @on(Button.Pressed)
+    def pressed(self, e: Button.Pressed) -> None:
+        bid = e.button.id or ""
+        self.dismiss(self.choices[int(bid[1:])][0] if bid.startswith("c") else None)
+
+
 class TextScreen(_Dialog):
     def __init__(self, title: str, label: str, value: str = "") -> None:
         super().__init__()

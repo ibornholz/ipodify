@@ -131,6 +131,7 @@ class SpotifyAPI:
             url=t.get("external_urls", {}).get("spotify", f"https://open.spotify.com/track/{t['id']}"),
             album_uri=album.get("uri", ""), year=self._year(album.get("release_date")),
             track_nr=t.get("track_number", 0),
+            cover=next((i["url"] for i in album.get("images", []) if i.get("url")), ""),
         )
 
     def _album(self, a: dict) -> Album:

@@ -25,7 +25,17 @@ iPod (tags, playlists, deleting) without iTunes.
   iPodify's own audio path for iPod files and podcasts. Peaks hold and fall like Winamp's.
 - **Everything to the iPod.** `i` sends the selected song, album or playlist. `I` sends everything in
   the current view. Tracks already on the iPod are marked ✓ and skipped. Downloads run in batches, and
-  each batch goes into the iTunesDB in a single write, into an "iPodify" playlist.
+  each batch goes into the iTunesDB in a single write, into an "iPodify" playlist. spotDL looks on
+  YouTube Music, YouTube, SoundCloud and Bandcamp, in that order.
+- **Know what's missing before you start.** *Verfügbarkeit prüfen* asks spotDL for a source for every
+  track of an album or playlist without downloading anything; the *Web* column shows ✓ or ✗. Sending an
+  album to the iPod runs that check first and tells you which titles no source has, so an audiobook
+  does not end up with chapters missing.
+- **Record what nobody has.** Tracks that exist only on Spotify can be captured from the Web Playback
+  SDK player in real time (*mitschneiden*): the headless Chromium is restarted with its audio routed
+  into a private PipeWire null sink, so nothing reaches the speakers, and the capture is encoded with
+  tags and cover art and transferred like any other download. One album chapter takes as long as it
+  plays. This is a last resort and against Spotify's terms of service; it's your call.
 - **Podcasts.** Search the Apple Podcasts directory, subscribe, listen in the app. *Sync* puts the
   newest 1/3/5/10 episodes of each subscription into the iPod's Podcasts menu (unplayed bullet,
   remembered position, artwork, show notes). It removes older episodes that iPodify put there itself and
@@ -127,6 +137,11 @@ Other files: podcast subscriptions in `~/.config/ipodify/podcasts.json`; downloa
   (`diskutil disableJournal /Volumes/<iPod>`) is the cleanest setup for Linux.
 - **Transfers fail with "YouTube-Bot-Sperre".** YouTube is asking spotDL to prove it's not a bot. Set
   `cookies_from_browser` (see above) or try again later.
+- **"kein passender YouTube-Treffer".** The track is not on any of spotDL's sources. Use *⏺ mitschneiden*
+  in the transfers view (or the album view) to record it from the Spotify player instead.
+- **A recording came out too short or silent.** The capture needs `player = "sdk"` and the PipeWire
+  PulseAudio shim (`pactl`, `parec`). While recording, the Spotify player is muted on purpose; the
+  recorded track should show up in the LCD as playing.
 - **No sound with `player = "librespot"`.** Spotify currently refuses librespot's audio keys for many
   accounts ([librespot#1649](https://github.com/librespot-org/librespot/issues/1649)). That's why the
   default player is the Web Playback SDK.
@@ -143,9 +158,11 @@ SDK player, the audio and analyzer paths, the libgpod helper protocol and the iP
 ## Legal
 
 iPodify is a personal hobby project and is not affiliated with Apple or Spotify. "iPod" and "Spotify"
-are trademarks of their respective owners. spotDL downloads audio from YouTube. Only download content
-you are allowed to download in your country. iPodify does not circumvent Spotify's DRM, and it does not
-download Spotify audiobooks.
+are trademarks of their respective owners. spotDL downloads audio from YouTube and other public sources.
+Only download content you are allowed to download in your country. iPodify does not circumvent Spotify's
+DRM and does not download Spotify audiobooks. The optional recording feature captures the audio the
+Spotify player outputs on this machine, for private use on your own iPod; it violates Spotify's terms of
+service and may be illegal where you live. Use it on your own responsibility.
 
 ## License
 
