@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.server
 import re
+from concurrent.futures import ThreadPoolExecutor
 import socket
 import subprocess
 import threading
@@ -30,6 +31,7 @@ SCOPES = " ".join([
 ])
 URL_RE = re.compile(r"open\.spotify\.com/(?:intl-\w+/)?(track|album|playlist|artist)/(\w+)")
 TOKEN_FILE = CONFIG_DIR / "spotify-token.json"
+SEARCH_PAGES = 5  # × 10 results per category
 
 
 class _TokenAuth:
@@ -177,15 +179,34 @@ class SpotifyAPI:
             item = self.resolve(kind, sid)
             return {"tracks": [item] if kind == "track" else [], "albums": [item] if kind == "album" else [],
                     "artists": [item] if kind == "artist" else [], "playlists": [item] if kind == "playlist" else []}
-        r = self._limited(self.sp.search, q, type="track,album,artist,playlist", market=self.market,
-                          limits=(10,))
-        items = lambda k: [x for x in (r.get(k) or {}).get("items", []) if x]  # noqa: E731
+        # Development-mode apps may ask for 10 results per request only, so fetch the pages in parallel.
+        with ThreadPoolExecutor(max_workers=SEARCH_PAGES) as pool:
+            pages = list(pool.map(lambda off: self._page(q, off), range(0, SEARCH_PAGES * 10, 10)))
+        seen: set[str] = set()
+
+        def items(k: str) -> list[dict]:
+            out = []
+            for r in pages:
+                for x in (r.get(k) or {}).get("items", []):
+                    if x and x.get("id") and x["id"] not in seen:
+                        seen.add(x["id"])
+                        out.append(x)
+            return out
+
         return {
             "tracks": [t for t in (self._track(x) for x in items("tracks")) if t],
             "albums": [self._album(x) for x in items("albums")],
             "artists": [self._artist(x) for x in items("artists")],
             "playlists": [self._playlist(x) for x in items("playlists")],
         }
+
+    def _page(self, q: str, offset: int) -> dict:
+        try:
+            return self.sp.search(q, type="track,album,artist,playlist", market=self.market, limit=10, offset=offset)
+        except spotipy.SpotifyException:
+            if offset == 0:
+                raise
+            return {}  # later pages are optional
 
     def resolve(self, kind: str, sid: str):
         if kind == "track":
