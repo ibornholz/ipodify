@@ -517,14 +517,19 @@ class Availability:
         except ValueError as e:
             raise RuntimeError("spotDL lieferte kein Ergebnis") from e
         found = {sg.get("song_id"): sg for sg in songs if sg and sg.get("download_url")}
+        complete = len(songs) == len(tracks)  # else spotDL gave up half-way: don't remember misses
         result: dict[str, bool] = {}
         with self.lock:
             for t in tracks:
                 sg = found.get(t.id)
                 result[t.id] = bool(sg)
-                self.data[t.id] = {"url": sg["download_url"] if sg else "", "t": time.time(),
-                                   **({"song": sg} if sg else {})}
+                if sg:
+                    self.data[t.id] = {"url": sg["download_url"], "t": time.time(), "song": sg}
+                elif complete:
+                    self.data[t.id] = {"url": "", "t": time.time()}
             self._save()
+        if not complete:
+            raise RuntimeError(f"spotDL hat nur {len(songs)} von {len(tracks)} Titeln geprüft")
         return result
 
     def forget(self, track_id: str) -> None:
